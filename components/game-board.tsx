@@ -7,6 +7,7 @@ import { Slider } from "@/components/ui/slider"
 import PokerTable from "./poker-table"
 import ScoreBoard from "./score-board"
 import GameOptions from "./game-options"
+import { X, ClipboardList } from "lucide-react"
 import {
   type GameState,
   type Player,
@@ -15,6 +16,7 @@ import {
   dealCards,
   determineRoundWinner,
 } from "@/lib/game-logic"
+import { handleAIPlayerTurn } from "@/lib/ai-player"
 
 export default function GameBoard() {
   const [gameState, setGameState] = useState<GameState>({
@@ -35,17 +37,48 @@ export default function GameBoard() {
 
   const [numCpuPlayers, setNumCpuPlayers] = useState(3)
   const [cpuDifficulty, setCpuDifficulty] = useState("medium")
-  const [canLeadWithTrump, setCanLeadWithTrump] = useState(true)
+  const [canLeadWithTrump, setCanLeadWithTrump] = useState(false)
+  const [autoplay, setAutoplay] = useState(true)
+  const [boardColor, setBoardColor] = useState("bg-green-800")
   const [showOptions, setShowOptions] = useState(false)
+  const [forbiddenBid, setForbiddenBid] = useState<number | null>(null)
+  const [showScoreboard, setShowScoreboard] = useState(false)
+  const [trumpBroken, setTrumpBroken] = useState(false)
+  const [maxRounds, setMaxRounds] = useState(7)
+  const [ladder, setLadder] = useState(true)
+  const [completedRounds, setCompletedRounds] = useState(0)
+
+  const cpuNames = ["Rube", "Marwan", "Lucille", "David", "Alice", "Tiger", "Sandra"]
+
+  useEffect(() => {
+    console.log("Trump broken state changed:", trumpBroken)
+  }, [trumpBroken])
+
+  const calculateMaxPossibleRounds = (numPlayers: number) => {
+    // Leaving a bug here, if players = 4 and 13 rounds selected then
+    // no trump in final round. Game logic works but CPU issues.
+    const maxRounds = Math.floor(52 / numPlayers)
+    return maxRounds
+  }
+
+  const calculateTotalRounds = () => {
+    if (ladder) {
+      return 2 * maxRounds - 1
+    }
+    return maxRounds
+  }
 
   const startGame = () => {
+    // Shuffle the CPU names
+    const shuffledNames = [...cpuNames].sort(() => Math.random() - 0.5)
+
     // Create players (1 human + CPU players)
     const players: Player[] = [{ id: 0, name: "You", type: "human" }]
 
     for (let i = 1; i <= numCpuPlayers; i++) {
       players.push({
         id: i,
-        name: `CPU ${i}`,
+        name: shuffledNames[(i - 1) % shuffledNames.length], // Use shuffled names
         type: "cpu",
         difficulty: cpuDifficulty,
       })
@@ -72,7 +105,7 @@ export default function GameBoard() {
       players,
       deck,
       currentRound: 1,
-      maxRounds: 7,
+      maxRounds: maxRounds,
       trumpCard: null,
       currentTrick: [],
       scores: initialScores,
@@ -83,6 +116,12 @@ export default function GameBoard() {
       phase: "bidding",
       trickWinner: -1,
     })
+
+    // Reset trump broken state for new game
+    setTrumpBroken(false)
+
+    // Reset completed rounds counter
+    setCompletedRounds(0)
 
     // Deal cards for the first round
     dealRound(1, players, deck, dealerPosition)
@@ -106,7 +145,7 @@ export default function GameBoard() {
       resetTricks[player.id] = 0
     })
 
-    // First player is to the left of the dealer
+    // First player is to the left of the dealer (clockwise)
     const firstPlayer = (dealerPosition + 1) % players.length
 
     setGameState((prev) => ({
@@ -121,16 +160,122 @@ export default function GameBoard() {
       currentPlayer: firstPlayer,
       dealerPosition,
     }))
+
+    // Reset forbidden bid
+    setForbiddenBid(null)
+
+    // Reset trump broken state for new round
+    setTrumpBroken(false)
   }
+
+  // Calculate the forbidden bid for the dealer
+  useEffect(() => {
+    if (gameState.phase === "bidding" && gameState.players.length > 0) {
+      const isLastBidder = gameState.currentPlayer === gameState.dealerPosition
+
+      if (isLastBidder) {
+        // Calculate the sum of all bids so far
+        let bidSum = 0
+        Object.entries(gameState.bids).forEach(([playerId, bid]) => {
+          if (bid !== -1 && Number(playerId) !== gameState.dealerPosition) {
+            bidSum += bid
+          }
+        })
+
+        // The forbidden bid is the one that would make the total equal to the number of cards
+        const cardsInRound = gameState.currentRound
+        const forbidden = cardsInRound - bidSum
+
+        // Set the forbidden bid (if it's a valid bid)
+        if (forbidden >= 0 && forbidden <= cardsInRound) {
+          setForbiddenBid(forbidden)
+        } else {
+          setForbiddenBid(null)
+        }
+      } else {
+        setForbiddenBid(null)
+      }
+    }
+  }, [
+    gameState.phase,
+    gameState.currentPlayer,
+    gameState.bids,
+    gameState.dealerPosition,
+    gameState.currentRound,
+    gameState.players.length,
+  ])
+
+  // Determine valid cards to play based on the lead suit
+  const getValidCards = (hand: CardType[], currentTrick: Array<CardType & { playerId: number }>) => {
+    // If this is the first card in the trick
+    if (currentTrick.length === 0) {
+      // If leading with trump is not allowed and trump hasn't been broken
+      // and we have non-trump cards
+      if (!canLeadWithTrump && !trumpBroken && gameState.trumpCard) {
+        const nonTrumpCards = hand.filter((card) => card.suit !== gameState.trumpCard?.suit)
+        // If we have non-trump cards, only those are valid
+        if (nonTrumpCards.length > 0) {
+          console.log("Restricting lead to non-trump cards:", nonTrumpCards.length, "cards available")
+          return nonTrumpCards
+        } else {
+          console.log("Only trump cards available for lead - trump will be broken")
+        }
+      }
+      // Otherwise all cards are valid
+      return hand
+    }
+
+    // If not leading, follow suit if possible
+    const leadSuit = currentTrick[0].suit
+    const cardsInSuit = hand.filter((card) => card.suit === leadSuit)
+
+    if (cardsInSuit.length > 0) {
+      return cardsInSuit
+    }
+
+    // If can't follow suit, any card is valid
+    return hand
+  }
+
+  // Autoplay logic - check if player has only one legal card and play it automatically
+  useEffect(() => {
+    if (
+      autoplay &&
+      gameState.phase === "playing" &&
+      gameState.currentPlayer === 0 && // Human player's turn
+      gameState.players.length > 0
+    ) {
+      const humanPlayer = gameState.players.find((p) => p.type === "human")
+      if (humanPlayer && humanPlayer.hand) {
+        const validCards = getValidCards(humanPlayer.hand, gameState.currentTrick)
+
+        // If there's only one valid card, play it automatically
+        if (validCards.length === 1) {
+          // Add a small delay so the player can see what's happening
+          const timeoutId = setTimeout(() => {
+            playCard(0, validCards[0])
+          }, 500)
+
+          return () => clearTimeout(timeoutId)
+        }
+      }
+    }
+  }, [gameState, autoplay, trumpBroken])
 
   const placeBid = (playerId: number, bid: number) => {
     setGameState((prev) => {
+      // Check if this is the dealer and the bid is forbidden
+      if (playerId === prev.dealerPosition && bid === forbiddenBid) {
+        // Don't allow this bid
+        return prev
+      }
+
       const newBids = { ...prev.bids, [playerId]: bid }
 
       // Check if all players have bid
       const allBidsPlaced = prev.players.every((player) => newBids[player.id] !== -1)
 
-      // If all bids are placed, the first player to play is the one to the left of the dealer
+      // If all bids are placed, the first player to play is the one to the left of the dealer (clockwise)
       const nextPlayer = allBidsPlaced
         ? (prev.dealerPosition + 1) % prev.players.length
         : (prev.currentPlayer + 1) % prev.players.length
@@ -146,6 +291,9 @@ export default function GameBoard() {
 
   const playCard = (playerId: number, card: CardType) => {
     setGameState((prev) => {
+      // Get the player's hand before removing the card
+      const playerHand = prev.players.find((p) => p.id === playerId)?.hand || []
+
       // Remove card from player's hand
       const updatedPlayers = prev.players.map((player) => {
         if (player.id === playerId) {
@@ -159,6 +307,31 @@ export default function GameBoard() {
 
       // Add card to current trick
       const newTrick = [...prev.currentTrick, { ...card, playerId }]
+
+      // Check if trump has been broken
+      if (!trumpBroken && prev.trumpCard) {
+        // Case 1: Player plays a trump card when they couldn't follow suit
+        if (card.suit === prev.trumpCard.suit && prev.currentTrick.length > 0) {
+          const leadSuit = prev.currentTrick[0].suit
+          // If the lead suit is not trump and the player played a trump
+          if (leadSuit !== prev.trumpCard.suit) {
+            console.log("Trump broken: Player played trump when couldn't follow suit")
+            setTrumpBroken(true)
+            console.log("canLeadWithTrump: ", canLeadWithTrump)
+            console.log("trumpBroken: ", trumpBroken)
+          }
+        }
+
+        // Case 2: Player leads with a trump card because it's the only suit they have
+        else if (card.suit === prev.trumpCard.suit && prev.currentTrick.length === 0 && !canLeadWithTrump) {
+          // Check if the player only had trump cards in their hand
+          const nonTrumpCards = playerHand.filter((c) => c.suit !== prev.trumpCard?.suit)
+          if (nonTrumpCards.length === 0 && playerHand.length > 0) {
+            console.log("Trump broken: Player led with trump because it's the only suit they have")
+            setTrumpBroken(true)
+          }
+        }
+      }
 
       // Check if trick is complete
       if (newTrick.length === prev.players.length) {
@@ -182,7 +355,7 @@ export default function GameBoard() {
         }
       }
 
-      // Continue with next player
+      // Continue with next player (clockwise)
       return {
         ...prev,
         players: updatedPlayers,
@@ -192,64 +365,77 @@ export default function GameBoard() {
     })
   }
 
-  // Handle trick completion after delay
-  useEffect(() => {
-    if (gameState.phase === "trickComplete") {
-      const timeoutId = setTimeout(() => {
-        setGameState((prev) => {
-          // Check if round is over (all cards played)
-          const isRoundOver = prev.players.every((player) => !player.hand || player.hand.length === 0)
+  // Handle continuing after trick completion (when user clicks)
+  const handleContinueAfterTrick = () => {
+    setGameState((prev) => {
+      // Check if round is over (all cards played)
+      const isRoundOver = prev.players.every((player) => !player.hand || player.hand.length === 0)
 
-          if (isRoundOver) {
-            // Calculate scores
-            const newScores = { ...prev.scores }
+      if (isRoundOver) {
+        // Calculate scores
+        const newScores = { ...prev.scores }
 
-            prev.players.forEach((player) => {
-              const bid = prev.bids[player.id]
-              const tricks = prev.tricks[player.id]
+        prev.players.forEach((player) => {
+          const bid = prev.bids[player.id]
+          const tricks = prev.tricks[player.id]
 
-              if (bid === tricks) {
-                newScores[player.id] += 10 + bid
-              }
-            })
-
-            // Check if game is over
-            if (prev.currentRound === prev.maxRounds) {
-              return {
-                ...prev,
-                currentTrick: [],
-                phase: "gameEnd",
-                currentPlayer: prev.trickWinner,
-              }
-            }
-
-            // Prepare for next round with new dealer
-            const newDealerPosition = (prev.dealerPosition + 1) % prev.players.length
-
-            return {
-              ...prev,
-              currentTrick: [],
-              scores: newScores,
-              phase: "roundEnd",
-              currentPlayer: prev.trickWinner,
-              currentRound: prev.currentRound + 1,
-              dealerPosition: newDealerPosition,
-            }
+          if (bid === tricks) {
+            newScores[player.id] += 10 + bid
           }
+        })
 
-          // Continue with next trick, winner leads
+        // Track completed rounds
+        const newCompletedRounds = completedRounds + 1
+        setCompletedRounds(newCompletedRounds)
+
+        // Calculate total rounds in the game
+        const totalRounds = ladder ? 2 * prev.maxRounds - 1 : prev.maxRounds
+
+        // Check if game is over
+        if (newCompletedRounds >= totalRounds) {
           return {
             ...prev,
             currentTrick: [],
-            phase: "playing",
+            phase: "gameEnd",
             currentPlayer: prev.trickWinner,
+            scores: newScores,
           }
-        })
-      }, 2000) // 2 second delay
+        }
 
-      return () => clearTimeout(timeoutId)
-    }
-  }, [gameState.phase])
+        // Prepare for next round with new dealer (clockwise)
+        const newDealerPosition = (prev.dealerPosition + 1) % prev.players.length
+
+        // Determine next round number
+        let nextRound
+
+        if (ladder && newCompletedRounds >= prev.maxRounds) {
+          // We're in the descending phase
+          nextRound = prev.maxRounds - (newCompletedRounds - prev.maxRounds + 1)
+        } else {
+          // We're in the ascending phase
+          nextRound = newCompletedRounds + 1
+        }
+
+        return {
+          ...prev,
+          currentTrick: [],
+          scores: newScores,
+          phase: "roundEnd",
+          currentPlayer: prev.trickWinner,
+          currentRound: nextRound,
+          dealerPosition: newDealerPosition,
+        }
+      }
+
+      // Continue with next trick, winner leads
+      return {
+        ...prev,
+        currentTrick: [],
+        phase: "playing",
+        currentPlayer: prev.trickWinner,
+      }
+    })
+  }
 
   const nextRound = () => {
     // Create a fresh deck for each round to ensure we have enough cards
@@ -275,53 +461,23 @@ export default function GameBoard() {
 
     // If it's a CPU player's turn
     if (currentPlayer && currentPlayer.type === "cpu") {
-      const cpuAction = () => {
-        if (gameState.phase === "bidding") {
-          // Simple CPU bidding strategy based on difficulty
-          const hand = currentPlayer.hand || []
-          let bid = 0
-
-          if (currentPlayer.difficulty === "easy") {
-            // Random bid
-            bid = Math.floor(Math.random() * (hand.length + 1))
-          } else if (currentPlayer.difficulty === "medium") {
-            // Slightly smarter bidding based on high cards
-            const highCards = hand.filter((card) => card.value === "A" || card.value === "K" || card.value === "Q")
-            bid = Math.min(highCards.length + 1, hand.length)
-          } else {
-            // Hard difficulty - more sophisticated bidding
-            const trumpCards = hand.filter((card) => card.suit === gameState.trumpCard?.suit)
-            const highCards = hand.filter((card) => card.value === "A" || card.value === "K")
-            bid = Math.min(trumpCards.length + highCards.length, hand.length)
-          }
-
-          // Place the bid after a short delay
-          setTimeout(() => placeBid(currentPlayer.id, bid), 1000)
-        } else if (gameState.phase === "playing") {
-          // Simple CPU card playing strategy
-          const hand = currentPlayer.hand || []
-          let cardToPlay = hand[0] // Default to first card
-
-          // Play a valid card based on the lead suit
-          if (gameState.currentTrick.length > 0) {
-            const leadSuit = gameState.currentTrick[0].suit
-            const validCards = hand.filter((card) => card.suit === leadSuit)
-
-            if (validCards.length > 0) {
-              cardToPlay = validCards[0]
-            }
-          }
-
-          // Play the card after a short delay
-          setTimeout(() => playCard(currentPlayer.id, cardToPlay), 1000)
-        }
+      // Use the AI player logic to handle the turn
+      const aiAction = () => {
+        handleAIPlayerTurn({
+          gameState,
+          player: currentPlayer,
+          forbiddenBid,
+          onPlaceBid: (bid) => placeBid(currentPlayer.id, bid),
+          onPlayCard: (card) => playCard(currentPlayer.id, card),
+          canLeadWithTrump: canLeadWithTrump || trumpBroken,
+        })
       }
 
       // Add a delay for CPU actions to make the game feel more natural
-      const timeoutId = setTimeout(cpuAction, 1000)
+      const timeoutId = setTimeout(aiAction, 1000)
       return () => clearTimeout(timeoutId)
     }
-  }, [gameState])
+  }, [gameState, forbiddenBid, canLeadWithTrump, trumpBroken])
 
   // Toggle options view
   const toggleOptions = () => {
@@ -329,10 +485,33 @@ export default function GameBoard() {
   }
 
   // Save options and return to main menu
-  const saveOptions = (options: { cpuDifficulty: string; canLeadWithTrump: boolean }) => {
+  const saveOptions = (options: {
+    cpuDifficulty: string
+    canLeadWithTrump: boolean
+    autoplay: boolean
+    boardColor: string
+    ladder: boolean
+  }) => {
     setCpuDifficulty(options.cpuDifficulty)
     setCanLeadWithTrump(options.canLeadWithTrump)
+    setAutoplay(options.autoplay)
+    setBoardColor(options.boardColor)
+    setLadder(options.ladder)
     setShowOptions(false)
+  }
+
+  // Toggle scoreboard visibility
+  const toggleScoreboard = () => {
+    setShowScoreboard(!showScoreboard)
+  }
+
+  // Exit game (return to main menu)
+  const exitGame = () => {
+    setGameState({
+      ...gameState,
+      phase: "setup",
+    })
+    setShowScoreboard(false)
   }
 
   // Render different game phases
@@ -342,28 +521,59 @@ export default function GameBoard() {
         <GameOptions
           cpuDifficulty={cpuDifficulty}
           canLeadWithTrump={canLeadWithTrump}
+          autoplay={autoplay}
+          boardColor={boardColor}
+          ladder={ladder}
           onSave={saveOptions}
           onCancel={() => setShowOptions(false)}
         />
       )
     }
 
+    // Calculate the maximum possible rounds based on current number of players
+    const maxPossibleRounds = calculateMaxPossibleRounds(numCpuPlayers + 1)
+
     return (
       <Card className="p-6 w-full max-w-2xl mx-auto">
-        <h2 className="text-2xl font-bold mb-4">Oh Hell Card Game</h2>
-
-        <div className="space-y-4 mb-6">
+        <div className="space-y-6 mb-6">
           <div>
-            <label className="block mb-2">Number of CPU Players:</label>
+            <label className="block mb-2">Number of CPUs:</label>
             <Slider
               value={[numCpuPlayers]}
-              min={1}
-              max={5}
+              min={3}
+              max={7}
               step={1}
-              onValueChange={(value) => setNumCpuPlayers(value[0])}
+              onValueChange={(value) => {
+                setNumCpuPlayers(value[0])
+                // Adjust maxRounds if needed when number of players changes
+                const newMaxPossible = calculateMaxPossibleRounds(value[0] + 1)
+                if (maxRounds > newMaxPossible) {
+                  setMaxRounds(newMaxPossible)
+                }
+              }}
               className="mb-2"
             />
             <span className="block text-center">{numCpuPlayers}</span>
+          </div>
+
+          <div>
+            <label className="block mb-2">Number of Rounds:</label>
+            <Slider
+              value={[maxRounds]}
+              min={1}
+              max={maxPossibleRounds}
+              step={1}
+              onValueChange={(value) => setMaxRounds(value[0])}
+              className="mb-2"
+            />
+            <div className="flex justify-between text-sm">
+              <span>1</span>
+              <span>{maxRounds}</span>
+              <span>{maxPossibleRounds}</span>
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              Maximum {maxPossibleRounds} rounds possible with {numCpuPlayers + 1} players (52 card limit)
+            </p>
           </div>
         </div>
 
@@ -381,81 +591,132 @@ export default function GameBoard() {
 
   return (
     <div className="w-full space-y-6">
-      <div className="flex justify-between items-center mb-4 bg-white p-4 rounded-lg shadow-sm">
-        <div>
-          <h2 className="text-xl font-semibold">
-            Round: {gameState.currentRound}/{gameState.maxRounds}
-          </h2>
-          <p>Dealer: {gameState.players[gameState.dealerPosition]?.name}</p>
-        </div>
+      <div className="relative">
+        <PokerTable
+          players={gameState.players}
+          currentPlayer={gameState.currentPlayer}
+          currentTrick={gameState.currentTrick}
+          trumpCard={gameState.trumpCard}
+          phase={gameState.phase}
+          bids={gameState.bids}
+          trickWinner={gameState.trickWinner}
+          dealerPosition={gameState.dealerPosition}
+          onPlayCard={(card) => {
+            if (card.suit === "bid") {
+              // Handle bid selection
+              const bidValue = Number.parseInt(card.value)
+              // Check if this is the dealer and the bid is forbidden
+              if (gameState.currentPlayer === gameState.dealerPosition && bidValue === forbiddenBid) {
+                return // Don't allow this bid
+              }
+              placeBid(0, bidValue)
+            } else {
+              // Handle card play
+              playCard(0, card)
+            }
+          }}
+          onContinue={handleContinueAfterTrick}
+          isPlayerTurn={gameState.currentPlayer === 0}
+          forbiddenBid={gameState.currentPlayer === gameState.dealerPosition ? forbiddenBid : null}
+          gameState={gameState}
+          boardColor={boardColor}
+          canLeadWithTrump={canLeadWithTrump || trumpBroken}
+          trumpBroken={trumpBroken}
+          roundInfo={{
+            currentRound: gameState.currentRound,
+            totalRounds: ladder ? 2 * gameState.maxRounds - 1 : gameState.maxRounds,
+            completedRounds: completedRounds,
+          }}
+        />
 
-        <div>
-          <p>Current Player: {gameState.players[gameState.currentPlayer]?.name}</p>
-          {gameState.phase === "trickComplete" && (
-            <p className="font-bold text-green-600">Trick Winner: {gameState.players[gameState.trickWinner]?.name}</p>
-          )}
-        </div>
+        {/* Scoreboard Button */}
+        <Button
+          onClick={toggleScoreboard}
+          className="absolute bottom-4 right-4 z-40 rounded-full w-12 h-12 p-0"
+          variant="secondary"
+        >
+          <ClipboardList className="h-6 w-6" />
+        </Button>
+
+        {/* Pop-up Scoreboard */}
+        {(showScoreboard || gameState.phase === "roundEnd") && (
+          <div className="absolute inset-0 flex items-center justify-center z-50">
+            <div className="bg-white/95 rounded-xl shadow-2xl p-6 w-5/6 max-w-2xl mx-auto border-2 border-primary relative">
+              {/* Close button */}
+              {showScoreboard && gameState.phase !== "roundEnd" && (
+                <Button onClick={toggleScoreboard} variant="ghost" size="icon" className="absolute top-2 right-2">
+                  <X className="h-5 w-5" />
+                </Button>
+              )}
+
+              <h3 className="text-2xl font-bold text-center mb-4">
+                {gameState.phase === "roundEnd" ? `Round ${gameState.currentRound - 1} Complete!` : "Scoreboard"}
+              </h3>
+
+              <ScoreBoard
+                players={gameState.players}
+                scores={gameState.scores}
+                bids={gameState.bids}
+                tricks={gameState.tricks}
+                showResults={gameState.phase === "roundEnd" || gameState.phase === "gameEnd"}
+              />
+
+              <div className="mt-6 text-center flex justify-center gap-4">
+                {gameState.phase === "roundEnd" && (
+                  <Button onClick={nextRound} size="lg" className="px-8">
+                    Start Next Round
+                  </Button>
+                )}
+                <Button onClick={exitGame} variant="outline" size="lg">
+                  Exit Game
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Game End Pop-up */}
+        {gameState.phase === "gameEnd" && (
+          <div className="absolute inset-0 flex items-center justify-center z-50">
+            <div className="bg-white/95 rounded-xl shadow-2xl p-6 w-5/6 max-w-2xl mx-auto border-2 border-primary">
+              <h3 className="text-2xl font-bold text-center mb-4">Game Over!</h3>
+
+              <ScoreBoard
+                players={gameState.players}
+                scores={gameState.scores}
+                bids={gameState.bids}
+                tricks={gameState.tricks}
+                showResults={true}
+              />
+
+              <p className="text-xl font-bold text-center mt-6 mb-4">
+                Winner:{" "}
+                {Object.entries(gameState.scores).reduce(
+                  (winner, [playerId, score]) => (score > winner.score ? { id: playerId, score } : winner),
+                  { id: "-1", score: -1 },
+                ).id !== "-1"
+                  ? gameState.players.find(
+                      (p) =>
+                        p.id ===
+                        Number.parseInt(
+                          Object.entries(gameState.scores).reduce(
+                            (winner, [playerId, score]) => (score > winner.score ? { id: playerId, score } : winner),
+                            { id: "-1", score: -1 },
+                          ).id,
+                        ),
+                    )?.name
+                  : "Tie"}
+              </p>
+
+              <div className="mt-4 text-center flex justify-center">
+                <Button onClick={exitGame} size="lg">
+                  Exit Game
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
-
-      <ScoreBoard
-        players={gameState.players}
-        scores={gameState.scores}
-        bids={gameState.bids}
-        tricks={gameState.tricks}
-      />
-
-      <PokerTable
-        players={gameState.players}
-        currentPlayer={gameState.currentPlayer}
-        currentTrick={gameState.currentTrick}
-        trumpCard={gameState.trumpCard}
-        phase={gameState.phase}
-        bids={gameState.bids}
-        trickWinner={gameState.trickWinner}
-        dealerPosition={gameState.dealerPosition}
-        onPlayCard={(card) => {
-          if (card.suit === "bid") {
-            // Handle bid selection
-            placeBid(0, Number.parseInt(card.value))
-          } else {
-            // Handle card play
-            playCard(0, card)
-          }
-        }}
-        isPlayerTurn={gameState.currentPlayer === 0}
-      />
-
-      {gameState.phase === "roundEnd" && (
-        <div className="text-center p-4 bg-white rounded-lg shadow-sm">
-          <h3 className="text-xl mb-4">Round {gameState.currentRound - 1} Complete!</h3>
-          <Button onClick={nextRound}>Start Next Round</Button>
-        </div>
-      )}
-
-      {gameState.phase === "gameEnd" && (
-        <div className="text-center p-4 bg-white rounded-lg shadow-sm">
-          <h3 className="text-xl mb-4">Game Over!</h3>
-          <p className="mb-4">
-            Winner:{" "}
-            {Object.entries(gameState.scores).reduce(
-              (winner, [playerId, score]) => (score > winner.score ? { id: playerId, score } : winner),
-              { id: "-1", score: -1 },
-            ).id !== "-1"
-              ? gameState.players.find(
-                  (p) =>
-                    p.id ===
-                    Number.parseInt(
-                      Object.entries(gameState.scores).reduce(
-                        (winner, [playerId, score]) => (score > winner.score ? { id: playerId, score } : winner),
-                        { id: "-1", score: -1 },
-                      ).id,
-                    ),
-                )?.name
-              : "Tie"}
-          </p>
-          <Button onClick={() => setGameState({ ...gameState, phase: "setup" })}>Play Again</Button>
-        </div>
-      )}
     </div>
   )
 }
