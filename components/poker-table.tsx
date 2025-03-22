@@ -4,6 +4,7 @@ import { motion } from "framer-motion"
 import type { Player, Card as CardType, GameState } from "@/lib/game-logic"
 import PlayingCard from "./playing-card"
 import { User, Monitor } from "lucide-react"
+import FaceDownCard from "./face-down-card"
 
 interface PokerTableProps {
   players: Player[]
@@ -21,6 +22,7 @@ interface PokerTableProps {
   onContinue?: () => void
   boardColor?: string
   canLeadWithTrump?: boolean
+  optLeadWithTrump?: boolean
   trumpBroken?: boolean
   roundInfo?: {
     currentRound: number
@@ -45,36 +47,33 @@ export default function PokerTable({
   onContinue,
   boardColor = "bg-green-800",
   canLeadWithTrump = false,
+  optLeadWithTrump = false,
   trumpBroken = false,
   roundInfo,
 }: PokerTableProps) {
-  // Get human player and CPU players
+  // Find players
   const humanPlayer = players.find((p) => p.type === "human")
   const cpuPlayers = players.filter((p) => p.type === "cpu")
 
-  // Get valid cards for human player
+  // Get human player's hand and valid cards
   const humanHand = humanPlayer?.hand || []
   const validCards = isPlayerTurn && phase === "playing" ? getValidCards(humanHand) : []
 
-  // Find played card for a specific player
-  const getPlayedCard = (playerId: number) => {
+  // Helper functions
+  function getPlayedCard(playerId: number) {
     return currentTrick.find((card) => card.playerId === playerId)
   }
 
-  // Determine valid cards to play based on the lead suit (for human player)
   function getValidCards(hand: CardType[]) {
     // If this is the first card in the trick
     if (currentTrick.length === 0) {
-      // If leading with trump is not allowed and trump hasn't been broken
-      // and we have non-trump cards
-      if (!canLeadWithTrump && !trumpBroken && trumpCard) {
+      // If leading with trump is not allowed and we have non-trump cards
+      if (!canLeadWithTrump && trumpCard) {
         const nonTrumpCards = hand.filter((card) => card.suit !== trumpCard.suit)
         // If we have non-trump cards, only those are valid
         if (nonTrumpCards.length > 0) {
           return nonTrumpCards
         }
-        // If we only have trump cards, all cards are valid (and trump will be broken)
-        console.log("PokerTable: Only trump cards available for lead")
       }
       // Otherwise all cards are valid
       return hand
@@ -92,19 +91,7 @@ export default function PokerTable({
     return hand
   }
 
-  // Calculate total bids placed so far (excluding dealer if they haven't bid yet)
-  const calculateTotalBids = (bids: Record<number, number>, dealerPosition: number) => {
-    let total = 0
-    Object.entries(bids).forEach(([playerId, bid]) => {
-      if (bid !== -1 && Number(playerId) !== dealerPosition) {
-        total += bid
-      }
-    })
-    return total
-  }
-
-  // Calculate total tricks bid by all players
-  const calculateTotalTricksBid = () => {
+  function calculateTotalBids() {
     let total = 0
     Object.values(bids).forEach((bid) => {
       if (bid !== -1) {
@@ -114,8 +101,7 @@ export default function PokerTable({
     return total
   }
 
-  // Handle click on the table to continue after trick completion
-  const handleTableClick = () => {
+  function handleTableClick() {
     if (phase === "trickComplete" && onContinue) {
       onContinue()
     }
@@ -126,18 +112,17 @@ export default function PokerTable({
       className={`relative w-full aspect-[4/3] ${boardColor} rounded-lg border-4 border-brown-800 shadow-xl overflow-hidden`}
       onClick={handleTableClick}
     >
-      {/* Trump card in center-far-right with improved spacing */}
+      {/* Trump card display */}
       {trumpCard && (
         <div className="absolute top-[70%] right-4 transform -translate-y-1/2 z-50">
           <div className="relative flex flex-col items-center space-y-2">
             <div className="text-white text-xs bg-black/70 p-1 px-3 rounded">
-              Trump {!canLeadWithTrump && trumpBroken && <span className="ml-1">(Broken)</span>}
+              Trump {!optLeadWithTrump && trumpBroken && <span className="ml-1">(Broken)</span>}
             </div>
             <PlayingCard card={trumpCard} disabled />
 
-            {/* Reduced spacing for tricks spoken for label */}
             <div className="text-white text-xs bg-black/70 p-1 px-3 rounded mt-1">
-              Tricks spoken for: {calculateTotalTricksBid()}/{gameState.currentRound}
+              Tricks spoken for: {calculateTotalBids()}/{gameState.currentRound}
             </div>
           </div>
         </div>
@@ -148,9 +133,7 @@ export default function PokerTable({
         <div className="absolute top-2 left-4 z-50">
           <div className="text-white text-xs bg-black/70 p-1 px-3 rounded">
             Round: {roundInfo.currentRound}
-            {roundInfo.completedRounds >= roundInfo.totalRounds / 2 &&
-              roundInfo.totalRounds > roundInfo.currentRound && <span className="ml-1">↓</span>}
-            {roundInfo.completedRounds < roundInfo.totalRounds / 2 && <span className="ml-1">↑</span>}
+            <span className="ml-1">{roundInfo.currentRound === roundInfo.completedRounds + 1 ? "↑" : "↓"}</span>
             <span className="ml-1">
               ({roundInfo.completedRounds + 1}/{roundInfo.totalRounds})
             </span>
@@ -158,24 +141,32 @@ export default function PokerTable({
         </div>
       )}
 
-      {/* CPU Players in a horizontal row at the top (10% from top) */}
+      {/* CPU Players */}
       <div className="absolute top-[10%] left-0 right-0 flex justify-center z-10">
         <div className="flex justify-center w-full px-2 flex-wrap">
-          {cpuPlayers.map((player, index) => {
+          {cpuPlayers.map((player) => {
             const isCurrentPlayer = currentPlayer === player.id
             const isDealer = dealerPosition === player.id
             const isWinner = trickWinner === player.id && phase === "trickComplete"
             const playedCard = getPlayedCard(player.id)
+            const hasCards = player.hand && player.hand.length > 0
 
             return (
               <div key={player.id} className="flex flex-col items-center mx-2 mb-2">
-                {/* CPU Avatar and Info - slightly smaller */}
+                {/* Face down card behind CPU avatar if they have cards */}
+                {hasCards && (
+                  <div className="absolute transform scale-75 -z-10" style={{ marginTop: "-5px" }}>
+                    <FaceDownCard />
+                  </div>
+                )}
+
+                {/* CPU Avatar and Info */}
                 <div
-                  className={`flex flex-col items-center p-1.5 rounded-full
-              ${isCurrentPlayer ? "bg-yellow-300/50" : ""}
-              ${isWinner ? "bg-green-500/50" : ""}
-              ${!isCurrentPlayer && !isWinner ? "bg-gray-800/30" : ""}
-              text-gray-300`}
+                  className={`flex flex-col items-center p-1.5 rounded-full z-10
+                    ${isCurrentPlayer ? "bg-yellow-300/50" : ""}
+                    ${isWinner ? "bg-green-500/50" : ""}
+                    ${!isCurrentPlayer && !isWinner ? "bg-gray-800/30" : ""}
+                    text-gray-300`}
                 >
                   <Monitor className="h-7 w-7" />
                   <div className="text-xs font-bold mt-0.5 whitespace-nowrap text-center">
@@ -183,7 +174,7 @@ export default function PokerTable({
                     {isDealer && <span className="ml-1">(D)</span>}
                   </div>
 
-                  {/* Bid and Tricks info - more compact */}
+                  {/* Bid and Tricks info */}
                   {bids[player.id] !== undefined && bids[player.id] !== -1 && (
                     <div className="text-xs mt-0.5 bg-black/70 px-2 py-0.5 rounded-full">Bid: {bids[player.id]}</div>
                   )}
@@ -192,7 +183,7 @@ export default function PokerTable({
                   </div>
                 </div>
 
-                {/* CPU Played Card - slightly closer to the CPU icon */}
+                {/* CPU Played Card */}
                 {playedCard && (
                   <div className="mt-4">
                     <div className={`relative ${isWinner ? "animate-pulse" : ""}`}>
@@ -210,7 +201,7 @@ export default function PokerTable({
         </div>
       </div>
 
-      {/* Human Player's played card - horizontal row slightly below center */}
+      {/* Human Player's played card */}
       {humanPlayer && getPlayedCard(humanPlayer.id) && (
         <div className="absolute top-[55%] left-0 right-0 flex justify-center z-20">
           <div
@@ -232,10 +223,10 @@ export default function PokerTable({
         </div>
       )}
 
-      {/* Human Player - icon on bottom-left-center, cards on bottom-right-center */}
+      {/* Human Player */}
       {humanPlayer && (
         <>
-          {/* Player avatar and info on bottom-left-center (25%) */}
+          {/* Player avatar and info */}
           <div
             className={`absolute bottom-6 left-[25%] transform -translate-x-1/2 flex flex-col items-center p-3 rounded-full bg-green-700/70 z-30
               ${currentPlayer === humanPlayer.id ? "bg-yellow-300/50" : ""}
@@ -257,7 +248,7 @@ export default function PokerTable({
             </div>
           </div>
 
-          {/* Player's hand on bottom-right-center (45%) */}
+          {/* Player's hand */}
           {humanPlayer.hand && humanPlayer.hand.length > 0 && (
             <div className="absolute bottom-6 right-[45%] transform translate-x-1/2 flex z-30">
               {humanPlayer.hand.map((card, cardIndex) => {
@@ -296,7 +287,7 @@ export default function PokerTable({
         </div>
       )}
 
-      {/* Bidding UI for human player - centered in the middle */}
+      {/* Bidding UI for human player */}
       {phase === "bidding" && currentPlayer === humanPlayer?.id && (
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-black/80 p-4 rounded-lg flex flex-col items-center space-y-4 z-40">
           <span className="text-white font-bold">Your Bid:</span>
@@ -308,7 +299,6 @@ export default function PokerTable({
                   key={i}
                   className={`w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold
                     ${bids[humanPlayer?.id] === i ? "bg-blue-500 text-white" : ""}
-                    ${isForbidden ? "bg-red-500 text-white cursor-not-allowed opacity-50" : "bg-white text-black"}
                     ${isForbidden ? "bg-red-500 text-white cursor-not-allowed opacity-50" : "bg-white text-black hover:bg-blue-200"}
                   `}
                   onClick={() =>
@@ -321,9 +311,7 @@ export default function PokerTable({
               )
             })}
           </div>
-          <div className="text-white text-sm">
-            Tricks spoken for: {calculateTotalBids(bids, gameState.dealerPosition)}
-          </div>
+          <div className="text-white text-sm">Tricks spoken for: {calculateTotalBids()}</div>
         </div>
       )}
     </div>
